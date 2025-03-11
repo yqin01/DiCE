@@ -258,11 +258,30 @@ class DicePyTorch(ExplainerBase):
         """Compute weighted distance between two vectors."""
         return torch.sum(torch.mul((torch.abs(x_hat - x1)), self.feature_weights_list), dim=0)
 
+    def compute_gelbrich_distance(self, x_hat, x1):
+        """
+        Compute Gelbrich distance between two feature vectors.
+        This replaces the default L1/L2 distance in counterfactual search.
+        """
+        # copute difference in means of distribution
+        mean_diff = torch.norm(x_hat - x1, p=2) ** 2  # Squared Euclidean distance
+
+        # covariance matrix calculation
+        cov_x_hat = torch.cov(x_hat.T) if x_hat.shape[0] > 1 else torch.eye(x_hat.shape[1]).to(x_hat.device)
+        cov_x1 = torch.cov(x1.T) if x1.shape[0] > 1 else torch.eye(x1.shape[1]).to(x1.device)
+
+        # compute trace term(difference in covariance structures) in gelbrich distance
+        sqrt_cov = torch.linalg.sqrtm(torch.mm(torch.mm(cov_x_hat, cov_x1), cov_x_hat))
+        trace_term = torch.trace(cov_x_hat + cov_x1 - 2 * sqrt_cov)
+
+        # final distance computation 
+        return mean_diff + trace_term
+    
     def compute_proximity_loss(self):
         """Compute the second part (distance from x1) of the loss function."""
         proximity_loss = 0.0
         for i in range(self.total_CFs):
-            proximity_loss += self.compute_dist(self.cfs[i], self.x1)
+            proximity_loss += self.compute_gelbrich_distance(self.cfs[i], self.x1)
         return proximity_loss/(torch.mul(len(self.minx[0]), self.total_CFs))
 
     def dpp_style(self, submethod):
@@ -300,7 +319,7 @@ class DicePyTorch(ExplainerBase):
             for i in range(self.total_CFs):
                 for j in range(i+1, self.total_CFs):
                     count += 1.0
-                    diversity_loss += 1.0/(1.0 + self.compute_dist(self.cfs[i], self.cfs[j]))
+                    diversity_loss += 1.0/(1.0 + self.compute_gelbrich_distance(self.cfs[i], self.cfs[j]))
 
             return 1.0 - (diversity_loss/count)
 

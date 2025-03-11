@@ -8,6 +8,7 @@ import timeit
 import numpy as np
 import tensorflow as tf
 
+
 from dice_ml import diverse_counterfactuals as exp
 from dice_ml.counterfactual_explanations import CounterfactualExplanations
 from dice_ml.explainer_interfaces.explainer_base import ExplainerBase
@@ -257,12 +258,48 @@ class DiceTensorFlow2(ExplainerBase):
     def compute_dist(self, x_hat, x1):
         """Compute weighted distance between two vectors."""
         return tf.reduce_sum(tf.multiply((tf.abs(x_hat - x1)), self.feature_weights_list))
+    
+    def compute_gelbrich_distance(self, x_hat, x1):
+        """Compute Gelbrich distance between two feature vectors without using TensorFlow Probability (TFP)."""
+
+        # Compute squared Euclidean distance (L2 norm squared)
+        mean_diff = tf.norm(x_hat - x1, ord=2) ** 2  
+
+        # Compute covariance matrices manually
+        def compute_covariance(matrix):
+            """Manually compute the covariance matrix."""
+            mean = tf.reduce_mean(matrix, axis=0, keepdims=True)
+            centered_matrix = matrix - mean
+            return tf.matmul(tf.transpose(centered_matrix), centered_matrix) / (tf.cast(tf.shape(matrix)[0], tf.float32) - 1)
+
+        cov_x_hat = compute_covariance(x_hat) if x_hat.shape[0] > 1 else tf.eye(tf.shape(x_hat)[1])
+        cov_x1 = compute_covariance(x1) if x1.shape[0] > 1 else tf.eye(tf.shape(x1)[1])
+
+        # Compute matrix square root approximation using Newton-Schulz iteration
+        def matrix_sqrt(mat, num_iter=10):
+            """Compute matrix square root using the Newton-Schulz iteration method."""
+            dim = tf.shape(mat)[0]
+            eye = tf.eye(dim)
+            y = mat
+            z = eye
+            for _ in range(num_iter):
+                y = 0.5 * (y + tf.linalg.inv(z))
+                z = 0.5 * (z + tf.linalg.inv(y))
+            return y
+
+        sqrt_cov = matrix_sqrt(tf.matmul(tf.matmul(cov_x_hat, cov_x1), cov_x_hat))
+
+        # Compute trace term in Gelbrich distance
+        trace_term = tf.linalg.trace(cov_x_hat + cov_x1 - 2 * sqrt_cov)
+
+        return mean_diff + trace_term
 
     def compute_proximity_loss(self):
         """Compute the second part (distance from x1) of the loss function."""
+        print(">>> Using Gelbrich Distance in TensorFlow Backend!")
         proximity_loss = 0.0
         for i in range(self.total_CFs):
-            proximity_loss += self.compute_dist(self.cfs[i], self.x1)
+            proximity_loss += self.compute_gelbrich_distance(self.cfs[i], self.x1)
         return proximity_loss/tf.cast((tf.multiply(len(self.minx[0]), self.total_CFs)), dtype=tf.float32)
 
     def dpp_style(self, submethod):
@@ -281,7 +318,7 @@ class DiceTensorFlow2(ExplainerBase):
             for i in range(self.total_CFs):
                 for j in range(self.total_CFs):
                     det_temp_entry = tf.divide(1.0, tf.exp(
-                        self.compute_dist(self.cfs[i], self.cfs[j])))
+                        self.compute_gelbrich_distance(self.cfs[i], self.cfs[j])))
                     det_entries.append(det_temp_entry)
 
         det_entries = tf.reshape(det_entries, [self.total_CFs, self.total_CFs])
@@ -303,7 +340,7 @@ class DiceTensorFlow2(ExplainerBase):
             for i in range(self.total_CFs):
                 for j in range(i+1, self.total_CFs):
                     count += 1.0
-                    diversity_loss += 1.0/(1.0 + self.compute_dist(self.cfs[i], self.cfs[j]))
+                    diversity_loss += 1.0/(1.0 + self.compute_gelbrich_distance(self.cfs[i], self.cfs[j]))
 
             return 1.0 - (diversity_loss/count)
 
@@ -318,7 +355,8 @@ class DiceTensorFlow2(ExplainerBase):
         return regularization_loss
 
     def compute_loss(self):
-        """Computes the overall loss"""
+        """Computes the overall loss using Gelbrich distance for proximity loss."""
+        print("gelbrich")
         self.yloss = self.compute_yloss()
         self.proximity_loss = self.compute_proximity_loss() if self.proximity_weight > 0 else 0.0
         self.diversity_loss = self.compute_diversity_loss() if self.diversity_weight > 0 else 0.0
